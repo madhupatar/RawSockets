@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+import socket
+import argparse
+import re
+import sys
+
+#Arguments from the command line
+parser = argparse.ArgumentParser(prog='client', add_help=False)
+parser.add_argument('username', type=str, action='store')
+parser.add_argument('password', type=str, action='store')
+
+#Assigning the username and password to login to Fakebook
+username = parser.parse_args().username
+password = parser.parse_args().password
+
+#Default values
+#Assuming the Root page for Fakebook 
+host_name = 'webcrawler-site.ccs.neu.edu'
+port = 80
+address = (host_name,port)
+
+#Creating a set to store all the unique URLs to be visited. Set shall ensure that the webcrawler does not run in loops.
+#Frontier contains all the Fakebook URLs that are yet to be visited. This list shall track the frontier.
+frontierUrls = ['/fakebook/']
+visitedUrls = []
+
+#List to store all the secret flags once obtained 
+secretflag = []
+
+#Create a socket connection for sending message.
+def send_msg(request):    
+    http_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    http_client.connect((host_name, port))
+    http_client.sendall(request)
+    res = http_client.recv(8192)
+    http_client.close()
+    return res
+
+
+#Fetch the HTTP status 
+def http_status(response):
+    response = response.decode()
+    index = response.index(' ')+1
+    status = response[index:index+3]
+    
+    return int(status)
+
+
+#Method to successfully login to Fakebook
+def loginToFakebook(username,password):
+    
+    #From Root page to Home Page connection
+    request = bytes("GET / HTTP/1.1\nHost: %s\n\n" % (host_name),'ascii')
+    result = send_msg(request)
+    stats = http_status(result)
+    
+    if stats != 200:
+        raise ValueError("Did not receive acknowlegdement OK 200 message")
+
+    #Fetch the cookie values assuming the log-in form for Fakebook is available at the following site
+    request = bytes('GET /accounts/login/?next=/fakebook/ HTTP/1.1\r\nHost: %s\r\n\r\n' % (host_name),'ascii')
+    result = send_msg(request)
+    stats = http_status(result)
+    if stats != 200:
+        raise ValueError("Did not receive acknowlegdement OK 200 message")
+    
+    result = str(result,'ascii')
+
+    #Regex pattern to fetch csrf token value
+    csrfTokenRegex = re.search(r'(csrftoken=.*); expires', result).group(1)
+    csrfTokenGrab = csrfTokenRegex.split('=')
+    csrfToken = csrfTokenGrab[1]
+    
+    #Fetching the session ID
+    sessionid = cookie_session(result)
+
+    #Post Request    
+    postData = 'csrfmiddlewaretoken=%s&username=%s&password=%s' % (csrfToken, username, password) 
+    request = bytes('POST /accounts/login/ HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nContent-Length: %d' \
+          '\r\nContent-Type: application/x-www-form-urlencoded\r\nCookie: csrftoken=%s;' \
+'\r\n\r\n%s' % (host_name, len(postData), csrfToken, postData), 'ascii')
+
+    result = send_msg(request)
+    stats = http_status(result)
+    result = str(result,'ascii')
+
+    #To store the latest session ID
+    sessionid = cookie_session(result)
+        
+    return csrfToken,sessionid
+
+
+#Function to print the secret flags encountered
+def getSecretFlag(result):
+    #Secret flag format
+    pattern = re.compile(r"<h2 class='secret_flag' style=\"color:red\">FLAG: ([a-zA-Z0-9]{64})</h2>")
+    secretflag = pattern.findall(result)   
+    #Print exactly five lines of output - the five secret flags obtained through webcrawling Fakebook.
+    print(secretflag)
+
+#Helper function to get the Session ID for the cookie management.
+def cookie_session(data):
+    SESSION = ""
+    new_form = re.search(r'sessionid=[A-Za-z0-9]{32}', data)
+    if new_form == None:
+        return SESSION
+    new_form = new_form.group()
+    fetchsession = new_form[10:]
+    length = len(fetchsession)
+    fetchsession = fetchsession[0:(length)]
+    return fetchsession
+
+
+#Function for webcrawling through Fakebook
+def crawler (csrfToken,sessionid):
+
+    #Initially we shall look at the root of Fakebook and begin crawling.
+    while len(frontierUrls) > 0 and len(secretflag) < 5:
+        # use BFS to traverse
+        currentUrl = frontierUrls.pop(0)
+        
+        #Shall request to traverse through the Current URL link
+        request = bytes('GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\nCookie: csrftoken=%s; ' \
+                    'sessionid=%s\r\n\r\n' % (currentUrl, host_name, csrfToken,sessionid),'ascii')
+        result = send_msg(request)
+        stats = http_status(result)
+        result = str(result,'ascii')
+       
+        if stats != 200 :
+            print('We may have a problem. Status is', stats)
+
+
+            #To handle various http status codes and scenarios
+
+            #Indicates that the Server could not or would not handle the request from the client. 
+            #Crawler shall re-try the request for the URL until successful. Current link goes back into the Frontier.
+            if stats == 500 and currentUrl not in frontierUrls:
+                raise ValueError('Internal server error, retrying to connect..')
+                frontierUrls.append(currentUrl)
+
+            #This is an HTTP Redirect. Crawler makes an attempt to request again using the new URL given by the server.
+            elif stats == 301 and currentUrl not in frontierUrls:
+                raise ValueError('Page moved permanently, redirecting..')
+                frontierUrls.append(currentUrl)
+            
+            #Crawler abandons URL that generates this error code
+            elif stats == 403 or stats == 404:
+                raise ValueError('Page not found, abandoning url..')
+                if currentUrl not in frontierUrls:
+                    frontierUrls.remove(currentUrl)  
+   
+
+        # #Handling various HTTP status codes:
+        # elif stats == 500 and currentUrl not in frontierUrls:
+        #     raise ValueError('Internal server error, retrying to connect..')
+        #     frontierUrls.append(currentUrl)
+
+        # elif stats == 301 and currentUrl not in frontierUrls:
+        #     raise ValueError('Page moved permanently, redirecting..')
+        #     frontierUrls.append(currentUrl)
+            
+        # elif stats == 403 or stats == 404:
+        #     raise ValueError('Page not found, abandoning url..')
+        #     if currentUrl not in frontierUrls:
+        #         frontierUrls.remove(currentUrl)  
+   
+        #Searching for the flag in the current URL
+        visitedUrls.append(currentUrl)
+        if result.find("FLAG") != -1:
+            getSecretFlag(result)
+
+        #Ensuring that the crawler only traverses URLs that point to Fakebook pages ie. the target domain.
+        anchorLinkPattern = re.compile(r'<a href=\"(/fakebook/[a-z0-9/]+)\">')
+        links = anchorLinkPattern.findall(result)
+ 
+        #Appending the new unvisited links to the Frontier.
+        #Watching out for loops by comparing current URL with the previously visited URLs.
+        for link in links:
+            if link not in frontierUrls and link not in visitedUrls:
+                frontierUrls.append(link)
+        
+def main():
+    #To check whether the web crawler is executing on the command line with the following syntax ./webcrawler [username] [password]
+    if len(sys.argv) != 3:
+        raise ValueError("Please enter the correct arguments: ")
+
+    #Using Cross site request forgery CSRF tokens for cookies.
+    csrfToken,sessionid = loginToFakebook(username,password)
+    crawler(csrfToken, sessionid)
+
+#begin crawler
+main()
