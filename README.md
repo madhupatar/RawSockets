@@ -13,8 +13,9 @@ File structure
 The root directory is Rawsocket
 
 ./rawhttpget                   : shell script to launch program
-./rawhttpget.py                : python script to implement the main TCP protocol
-./util.py                      : help functions like unpack ip_datagram
+./main.py                : python script to implement the main TCP protocol
+./tcp.py                      : help functions for TCP layer
+./ip.py                      : help functions for IP later
 
 Command to launch program:
 sudo ./rawhttpget <url>
